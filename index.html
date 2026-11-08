@@ -680,7 +680,7 @@
                 </div>
                 <div class="modal-row">
                     <span class="modal-label">Karten-Overlay:</span>
-                    <span class="modal-val">Maximaler Zoom (Zoom 17)</span>
+                    <span class="modal-val">Dynamische Anisotrope Textur</span>
                 </div>
 
                 <div style="margin-top: 8px; font-weight: 600; color: var(--accent);">
@@ -690,10 +690,10 @@
                     <li><strong>Open Topo Data API:</strong> EU-DEM 25m hochauflösendes europäisches Höhenmodell</li>
                     <li><strong>Corsproxy.io:</strong> Öffentlicher CORS-Proxy für API-Aufrufe direkt im Browser</li>
                     <li><strong>Leaflet.js (v1.9.4):</strong> Interaktive 2D-Kartenansicht und Rechteck-Auswahl</li>
-                    <li><strong>Three.js (v0.128.0):</strong> 3D-WebGL-Rendering, Licht- & Schattenberechnung</li>
+                    <li><strong>Three.js (v0.128.0):</strong> 3D-WebGL-Rendering mit Anisotropie-Filterung</li>
                     <li><strong>OrbitControls.js:</strong> Maussteuerung für die 3D-Kamera (Drehen/Pan/Zoom)</li>
                     <li><strong>AWS Terrarium Tile Server:</strong> Fallback-Höhendaten (Terrarium RGB-Tiles)</li>
-                    <li><strong>OpenTopoMap & OpenStreetMap:</strong> Maximale Kartenauflösung (Zoom 17 Tile Server)</li>
+                    <li><strong>OpenTopoMap & OpenStreetMap:</strong> Optimiere Tile-Kacheln für 2D- & 3D-Overlay</li>
                 </ul>
             </div>
         </div>
@@ -901,8 +901,12 @@
 
             const widthMeters = ne.distanceTo(sw);
 
-            // HIGHEST RESOLUTION AVAILABLE: Zoom 17 (Maximaler OpenTopoMap Detailgrad)
-            const zoom = 17;
+            // DYNAMISCH OPTIMIERTES ZOOMLEVEL (Sorgt für vollständiges Stitching ohne Unschärfe)
+            let zoom = 14;
+            if (widthMeters > 50000) zoom = 11;
+            else if (widthMeters > 20000) zoom = 12;
+            else if (widthMeters > 8000) zoom = 13;
+            else if (widthMeters < 3000) zoom = 15;
 
             let resolutionX = 2048;
             if (widthMeters > 15000) resolutionX = 4096;
@@ -951,6 +955,14 @@
             mapTextureCanvas = canvas;
             terrainCanvasTexture = new THREE.CanvasTexture(mapTextureCanvas);
             terrainCanvasTexture.encoding = THREE.sRGBEncoding;
+            
+            // ANISOTROPIC FILTERING FÜR MESSERSCHARFE DETAIL-DARSTELLUNG IN 3D
+            terrainCanvasTexture.minFilter = THREE.LinearFilter;
+            terrainCanvasTexture.magFilter = THREE.LinearFilter;
+            if (renderer) {
+                const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+                terrainCanvasTexture.anisotropy = maxAnisotropy;
+            }
             terrainCanvasTexture.needsUpdate = true;
         }
 
@@ -1016,11 +1028,8 @@
 
         function zoom3D(factor) {
             if (!camera || !controls) return;
-            
-            // Bewegung entlang der Kameralinie in Richtung Zielpunkt (Target)
             const target = controls.target;
             const offset = new THREE.Vector3().subVectors(camera.position, target);
-            
             offset.multiplyScalar(factor);
             camera.position.copy(target).add(offset);
             controls.update();
@@ -1152,7 +1161,6 @@
             const sw = selectedBounds.getSouthWest();
             const ne = selectedBounds.getNorthEast();
 
-            // 1. Koordinaten im Gitter generieren
             const pointsList = [];
             for (let r = 0; r < gridRows; r++) {
                 const lat = ne.lat - (r / (gridRows - 1)) * (ne.lat - sw.lat);
@@ -1171,7 +1179,6 @@
 
             let useFallback = false;
 
-            // 2. Chunks laden via OpenTopoData (25m EU-DEM)
             for (let i = 0; i < totalPoints; i += chunkSize) {
                 const chunk = pointsList.slice(i, i + chunkSize);
 
@@ -1183,7 +1190,6 @@
                     }
                 }
 
-                // Falls OpenTopoData fehlschlägt oder null liefert -> Fallback zu Terrarium DEM
                 for (let idx = 0; idx < chunk.length; idx++) {
                     let alt = elevations[idx];
                     if (alt === null || alt === undefined || useFallback) {
@@ -1202,7 +1208,6 @@
                 const srcLabel = useFallback ? 'Terrarium DEM (Fallback)' : 'OpenTopoData 25m EU-DEM';
                 document.getElementById('progress-text').innerText = `Lade ${srcLabel}... ${pct}% (${currentDone}/${totalPoints})`;
 
-                // 1 Sekunde Pause zur Einhaltung des API Rate-Limits
                 if (!useFallback && i + chunkSize < totalPoints) {
                     await new Promise(res => setTimeout(res, 1000));
                 } else if (useFallback && i % 200 === 0) {
@@ -1210,7 +1215,6 @@
                 }
             }
 
-            // 3. 2D-Matrix aufbauen
             terrainGridData = [];
             for (let r = 0; r < gridRows; r++) {
                 const row = [];
@@ -1220,7 +1224,7 @@
                 terrainGridData.push(row);
             }
 
-            document.getElementById('progress-text').innerText = `Erstelle Karten-Overlay in Höchstauflösung (Zoom 17)...`;
+            document.getElementById('progress-text').innerText = `Erstelle optimiertes Karten-Overlay...`;
             await generateMapOverlayTexture(selectedBounds);
 
             document.getElementById('progress-fill').style.width = '100%';
@@ -1273,7 +1277,6 @@
             const uvs = [];
             const indices = [];
 
-            // A) TOP TERRAIN SURFACE VERTICES & UVS (Norden = -Z, Süden = +Z, Westen = -X, Osten = +X)
             for (let r = 0; r < gridRows; r++) {
                 for (let c = 0; c < gridCols; c++) {
                     const x = (c / (gridCols - 1) - 0.5) * modelWidth;
@@ -1286,7 +1289,6 @@
                 }
             }
 
-            // Top Surface Triangles
             for (let r = 0; r < gridRows - 1; r++) {
                 for (let c = 0; c < gridCols - 1; c++) {
                     const i0 = r * gridCols + c;
@@ -1299,7 +1301,6 @@
                 }
             }
 
-            // B) BOTTOM FLAT BASE VERTICES
             const baseStartIdx = vertices.length / 3;
             for (let r = 0; r < gridRows; r++) {
                 for (let c = 0; c < gridCols; c++) {
@@ -1310,7 +1311,6 @@
                 }
             }
 
-            // Bottom Base Triangles
             for (let r = 0; r < gridRows - 1; r++) {
                 for (let c = 0; c < gridCols - 1; c++) {
                     const i0 = baseStartIdx + r * gridCols + c;
@@ -1323,7 +1323,6 @@
                 }
             }
 
-            // C) 4 SOLID SIDE WALLS
             const addWallQuad = (topA, topB, botA, botB) => {
                 indices.push(topA, botA, topB);
                 indices.push(topB, botA, botB);
@@ -1363,6 +1362,7 @@
             if (showTexture && terrainCanvasTexture) {
                 terrainCanvasTexture.needsUpdate = true;
                 
+                // ELEGANTE 1:1 FARBEN (UNLIT MATERIAL BEI GLEICHMÄSSIGER BELEUCHTUNG)
                 if (lightingMode === 'ambient') {
                     material = new THREE.MeshBasicMaterial({
                         map: terrainCanvasTexture,
@@ -1373,7 +1373,7 @@
                 } else {
                     material = new THREE.MeshStandardMaterial({
                         map: terrainCanvasTexture,
-                        roughness: 0.8,
+                        roughness: 0.9,
                         metalness: 0.0,
                         transparent: textureOpacity < 1.0,
                         opacity: textureOpacity,
@@ -1486,7 +1486,6 @@
             document.getElementById('btn-generate').addEventListener('click', processTerrainData);
             document.getElementById('btn-export-stl').addEventListener('click', exportBinarySTL);
 
-            // Zoom Buttons Event Handlers
             document.getElementById('btn-zoom-in').addEventListener('click', () => zoom3D(0.8));
             document.getElementById('btn-zoom-out').addEventListener('click', () => zoom3D(1.25));
 
