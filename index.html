@@ -332,6 +332,42 @@
             margin-bottom: 6px;
         }
 
+        /* 3D Zoom Controls Overlay */
+        .zoom-controls-overlay {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            z-index: 10;
+        }
+
+        .zoom-btn {
+            width: 36px;
+            height: 36px;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(4px);
+            border: 1px solid var(--border);
+            color: var(--accent);
+            font-size: 1.3rem;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+            transition: all 0.2s;
+            user-select: none;
+        }
+
+        .zoom-btn:hover {
+            background-color: var(--accent);
+            color: #0f172a;
+            border-color: var(--accent);
+        }
+
         .info-btn {
             width: 26px;
             height: 26px;
@@ -606,11 +642,18 @@
         <!-- Tab 2: Three.js WebGL -->
         <div id="tab-3d" class="tab-content">
             <div id="webgl-container"></div>
+            
+            <!-- Zoom Buttons -->
+            <div class="zoom-controls-overlay">
+                <button class="zoom-btn" id="btn-zoom-in" title="Hineinzoomen (+)">+</button>
+                <button class="zoom-btn" id="btn-zoom-out" title="Herauszoomen (−)">−</button>
+            </div>
+
             <div class="viewport-overlay">
                 <div class="overlay-title">🕹️ Steuerung 3D-Ansicht</div>
                 <div>• Linksklick + Ziehen: Drehen</div>
                 <div>• Rechtsklick + Ziehen: Verschieben</div>
-                <div>• Mausrad: Zoomen</div>
+                <div>• Mausrad / Buttons: Zoomen</div>
             </div>
         </div>
     </div>
@@ -861,7 +904,6 @@
             // HIGHEST RESOLUTION AVAILABLE: Zoom 17 (Maximaler OpenTopoMap Detailgrad)
             const zoom = 17;
 
-            // Canvas-Auflösung dynamisch skalieren (bis 4096 px), um die Zoom-17 Details scharf darzustellen
             let resolutionX = 2048;
             if (widthMeters > 15000) resolutionX = 4096;
             else if (widthMeters < 3000) resolutionX = 1024;
@@ -970,6 +1012,18 @@
             updateLightingMode();
 
             animate();
+        }
+
+        function zoom3D(factor) {
+            if (!camera || !controls) return;
+            
+            // Bewegung entlang der Kameralinie in Richtung Zielpunkt (Target)
+            const target = controls.target;
+            const offset = new THREE.Vector3().subVectors(camera.position, target);
+            
+            offset.multiplyScalar(factor);
+            camera.position.copy(target).add(offset);
+            controls.update();
         }
 
         // --- ASTRONOMISCHE SONNENSTANDSBERECHNUNG ---
@@ -1431,6 +1485,10 @@
 
             document.getElementById('btn-generate').addEventListener('click', processTerrainData);
             document.getElementById('btn-export-stl').addEventListener('click', exportBinarySTL);
+
+            // Zoom Buttons Event Handlers
+            document.getElementById('btn-zoom-in').addEventListener('click', () => zoom3D(0.8));
+            document.getElementById('btn-zoom-out').addEventListener('click', () => zoom3D(1.25));
 
             const sliders = [
                 { id: 'param-grid-res', label: 'param-grid-res-val', suffix: ' x ', appendVal: true },
