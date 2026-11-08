@@ -375,7 +375,7 @@
             background-color: var(--bg-card);
             border: 1px solid var(--border);
             border-radius: 12px;
-            width: 440px;
+            width: 460px;
             max-width: 90vw;
             padding: 20px;
             box-shadow: 0 10px 25px rgba(0,0,0,0.6);
@@ -632,19 +632,25 @@
                     <span class="modal-val">STL 3D-Druck Reliefs</span>
                 </div>
                 <div class="modal-row">
-                    <span class="modal-label">Volumen-Modell:</span>
-                    <span class="modal-val">Watertight Solid</span>
+                    <span class="modal-label">Höhendaten API:</span>
+                    <span class="modal-val">Open Topo Data (EU-DEM 25m)</span>
+                </div>
+                <div class="modal-row">
+                    <span class="modal-label">Karten-Overlay:</span>
+                    <span class="modal-val">Maximaler Zoom (Zoom 17)</span>
                 </div>
 
                 <div style="margin-top: 8px; font-weight: 600; color: var(--accent);">
                     🛠️ Externe Tools & Bibliotheken:
                 </div>
                 <ul class="tools-list">
+                    <li><strong>Open Topo Data API:</strong> EU-DEM 25m hochauflösendes europäisches Höhenmodell</li>
+                    <li><strong>Corsproxy.io:</strong> Öffentlicher CORS-Proxy für API-Aufrufe direkt im Browser</li>
                     <li><strong>Leaflet.js (v1.9.4):</strong> Interaktive 2D-Kartenansicht und Rechteck-Auswahl</li>
                     <li><strong>Three.js (v0.128.0):</strong> 3D-WebGL-Rendering, Licht- & Schattenberechnung</li>
                     <li><strong>OrbitControls.js:</strong> Maussteuerung für die 3D-Kamera (Drehen/Pan/Zoom)</li>
-                    <li><strong>AWS Terrarium Tile Server:</strong> Globale SRTM-Höhendaten (Raster DEM)</li>
-                    <li><strong>OpenTopoMap & OpenStreetMap:</strong> Karten-Tiles für 2D-Ansicht und 3D-Textur-Overlay</li>
+                    <li><strong>AWS Terrarium Tile Server:</strong> Fallback-Höhendaten (Terrarium RGB-Tiles)</li>
+                    <li><strong>OpenTopoMap & OpenStreetMap:</strong> Maximale Kartenauflösung (Zoom 17 Tile Server)</li>
                 </ul>
             </div>
         </div>
@@ -777,9 +783,9 @@
         });
 
         // ------------------------------------------------------------------
-        // ELEVATION & MAP TEXTURE FETCHING
+        // ELEVATION FETCHING: OPENTOPO DATA (25m EU-DEM) MIT TERRARIUM FALLBACK
         // ------------------------------------------------------------------
-        async function getElevation(lat, lng) {
+        async function getElevationTerrarium(lat, lng) {
             const zoom = 11;
             const x = Math.floor((lng + 180) / 360 * Math.pow(2, zoom));
             const latRad = lat * Math.PI / 180;
@@ -808,6 +814,25 @@
             return (pixel[0] * 256 + pixel[1] + pixel[2] / 256) - 32768;
         }
 
+        async function fetchOpenTopoDataBatch(locations) {
+            const coordsString = locations.map(p => `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`).join('|');
+            const targetUrl = `https://api.opentopodata.org/v1/eudem25m?locations=${coordsString}`;
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+
+            try {
+                const response = await fetch(proxyUrl);
+                if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+                const data = await response.json();
+                
+                if (data.results && data.results.length > 0) {
+                    return data.results.map(r => r.elevation !== null ? r.elevation : null);
+                }
+            } catch (err) {
+                console.warn("OpenTopoData Batch-Fehler, schalte auf Fallback um:", err);
+            }
+            return new Array(locations.length).fill(null);
+        }
+
         async function fetchMapTileImage(zoom, x, y) {
             const tileKey = `${zoom}/${x}/${y}`;
             if (mapTileCache.has(tileKey)) return mapTileCache.get(tileKey);
@@ -833,15 +858,13 @@
 
             const widthMeters = ne.distanceTo(sw);
 
-            // DYNAMISCHES ZOOMLEVEL: Je größer das Gebiet, desto kleiner der Zoom
-            let zoom = 13;
-            if (widthMeters > 80000) zoom = 10;
-            else if (widthMeters > 40000) zoom = 11;
-            else if (widthMeters > 15000) zoom = 12;
-            else if (widthMeters < 4000) zoom = 14;
+            // HIGHEST RESOLUTION AVAILABLE: Zoom 17 (Maximaler OpenTopoMap Detailgrad)
+            const zoom = 17;
 
-            // Dynamische Canvas-Auflösung für scharfe Beschriftungen und Höhenlinien
-            const resolutionX = widthMeters > 30000 ? 2048 : 1024;
+            // Canvas-Auflösung dynamisch skalieren (bis 4096 px), um die Zoom-17 Details scharf darzustellen
+            let resolutionX = 2048;
+            if (widthMeters > 15000) resolutionX = 4096;
+            else if (widthMeters < 3000) resolutionX = 1024;
             const resolutionY = resolutionX;
 
             const canvas = document.createElement('canvas');
@@ -1075,38 +1098,75 @@
             const sw = selectedBounds.getSouthWest();
             const ne = selectedBounds.getNorthEast();
 
-            terrainGridData = [];
+            // 1. Koordinaten im Gitter generieren
+            const pointsList = [];
+            for (let r = 0; r < gridRows; r++) {
+                const lat = ne.lat - (r / (gridRows - 1)) * (ne.lat - sw.lat);
+                for (let c = 0; c < gridCols; c++) {
+                    const lng = sw.lng + (c / (gridCols - 1)) * (ne.lng - sw.lng);
+                    pointsList.push({ r, c, lat, lng });
+                }
+            }
+
+            const totalPoints = pointsList.length;
+            const flatElevations = new Array(totalPoints);
+            const chunkSize = 100;
+
             minElevation = Infinity;
             maxElevation = -Infinity;
 
-            const totalPoints = gridRows * gridCols;
-            let currentPoint = 0;
+            let useFallback = false;
 
-            for (let r = 0; r < gridRows; r++) {
-                const row = [];
-                const lat = ne.lat - (r / (gridRows - 1)) * (ne.lat - sw.lat);
+            // 2. Chunks laden via OpenTopoData (25m EU-DEM)
+            for (let i = 0; i < totalPoints; i += chunkSize) {
+                const chunk = pointsList.slice(i, i + chunkSize);
 
-                for (let c = 0; c < gridCols; c++) {
-                    const lng = sw.lng + (c / (gridCols - 1)) * (ne.lng - sw.lng);
-                    const alt = await getElevation(lat, lng);
+                let elevations = [];
+                if (!useFallback) {
+                    elevations = await fetchOpenTopoDataBatch(chunk);
+                    if (elevations.every(val => val === null)) {
+                        useFallback = true;
+                    }
+                }
 
+                // Falls OpenTopoData fehlschlägt oder null liefert -> Fallback zu Terrarium DEM
+                for (let idx = 0; idx < chunk.length; idx++) {
+                    let alt = elevations[idx];
+                    if (alt === null || alt === undefined || useFallback) {
+                        alt = await getElevationTerrarium(chunk[idx].lat, chunk[idx].lng);
+                    }
+
+                    flatElevations[i + idx] = alt;
                     if (alt < minElevation) minElevation = alt;
                     if (alt > maxElevation) maxElevation = alt;
+                }
 
-                    row.push(alt);
+                const currentDone = Math.min(i + chunkSize, totalPoints);
+                const pct = Math.floor((currentDone / totalPoints) * 100);
+                document.getElementById('progress-fill').style.width = pct + '%';
+                
+                const srcLabel = useFallback ? 'Terrarium DEM (Fallback)' : 'OpenTopoData 25m EU-DEM';
+                document.getElementById('progress-text').innerText = `Lade ${srcLabel}... ${pct}% (${currentDone}/${totalPoints})`;
 
-                    currentPoint++;
-                    if (currentPoint % 50 === 0 || currentPoint === totalPoints) {
-                        const pct = Math.floor((currentPoint / (totalPoints * 1.5)) * 100);
-                        document.getElementById('progress-fill').style.width = pct + '%';
-                        document.getElementById('progress-text').innerText = `Lade Höhendaten... ${pct}%`;
-                        await new Promise(res => setTimeout(res, 0));
-                    }
+                // 1 Sekunde Pause zur Einhaltung des API Rate-Limits
+                if (!useFallback && i + chunkSize < totalPoints) {
+                    await new Promise(res => setTimeout(res, 1000));
+                } else if (useFallback && i % 200 === 0) {
+                    await new Promise(res => setTimeout(res, 0));
+                }
+            }
+
+            // 3. 2D-Matrix aufbauen
+            terrainGridData = [];
+            for (let r = 0; r < gridRows; r++) {
+                const row = [];
+                for (let c = 0; c < gridCols; c++) {
+                    row.push(flatElevations[r * gridCols + c]);
                 }
                 terrainGridData.push(row);
             }
 
-            document.getElementById('progress-text').innerText = `Erstelle Karten-Overlay...`;
+            document.getElementById('progress-text').innerText = `Erstelle Karten-Overlay in Höchstauflösung (Zoom 17)...`;
             await generateMapOverlayTexture(selectedBounds);
 
             document.getElementById('progress-fill').style.width = '100%';
